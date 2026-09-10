@@ -1,4 +1,14 @@
-# Engineering Intelligence Hub (RAG API)
+# KnowledgeHub API (RAG API)
+
+Imagine joining a new company where all guidelines, rules, code, and documentation are scattered across hundreds of different files and formats. Instead of spending days hunting down the right information or constantly interrupting colleagues, this project creates a smart technical assistant for the team.
+
+What the project does:
+
+    -Collects and Reads Documents: Automatically processes all internal technical documentation and code.
+
+    -Identifies Key Insights: Breaks those documents down into smaller chunks and stores them in its "smart memory" (a vector database).
+
+    -Answers Questions with Proof: When asked a question (e.g., "How do we run this service?" or "What does this function do?"), the assistant instantly retrieves the exact relevant excerpts, analyzes them, and delivers a clear answer in English or Croatian—along with precise source citations referencing where the information was extracted.
 
 > A production-ready, asynchronous Retrieval-Augmented Generation (RAG) API built with FastAPI, LangChain, ChromaDB, and Groq LLM for intelligent document querying across enterprise file formats.
 
