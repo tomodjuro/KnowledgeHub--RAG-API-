@@ -7,7 +7,7 @@
 [![ChromaDB](https://img.shields.io/badge/VectorDB-ChromaDB-purple.svg)](https://www.trychroma.com/)
 [![Groq](https://img.shields.io/badge/LLM-Groq%20API-orange.svg)](https://groq.com/)
 
-> A production-ready, asynchronous Retrieval-Augmented Generation (RAG) API built with FastAPI, LangChain, ChromaDB, and Groq LLM for intelligent document querying across enterprise file formats.
+> An asynchronous Retrieval-Augmented Generation (RAG) API built with FastAPI, LangChain, ChromaDB, and Groq LLM for intelligent document querying across enterprise file formats.
 
 ---
 
