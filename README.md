@@ -1,3 +1,6 @@
+[![CI Pipeline](https://github.com/tomodjuro/KnowledgeHub--RAG-API-/actions/workflows/ci.yml/badge.svg)](https://github.com/tomodjuro/KnowledgeHub--RAG-API-/actions)
+
+
 # KnowledgeHub API (RAG API)
 
 
