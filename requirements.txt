@@ -24,3 +24,7 @@ pytest
 python-dotenv
 
 pandas
+pypdf 
+docx2txt
+openpyxl
+unstructured
