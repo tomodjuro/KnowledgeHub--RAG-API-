@@ -24,18 +24,18 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest
+        pip install pytest httpx
+
+    - name: Prepare Test Files
+      run: |
+        mkdir -p test_docs
+        echo "Testni sadržaj za API" > test_docs/test_info.txt
+        mkdir -p docs
+        echo "Inicijalni dokument" > docs/sample.txt
 
     - name: Run Ingest
       run: |
         python ingest.py
-
-    - name: Start FastAPI server
-      env:
-        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      run: |
-        uvicorn main:app --host 127.0.0.1 --port 8000 &
-        sleep 3
 
     - name: Run E2E Tests
       env:

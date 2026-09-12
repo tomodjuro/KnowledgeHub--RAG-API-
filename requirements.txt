@@ -29,3 +29,4 @@ docx2txt
 openpyxl
 unstructured
 python-docx
+httpx
