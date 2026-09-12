@@ -8,6 +8,7 @@ langchain-community
 langchain-chroma
 langchain-huggingface
 langchain-text-splitters
+langchain-groq
 
 # Embeddings & Vector Store
 sentence-transformers
@@ -23,6 +24,7 @@ unstructured
 pytest
 python-dotenv
 
+# extensions
 pandas
 pypdf 
 docx2txt
