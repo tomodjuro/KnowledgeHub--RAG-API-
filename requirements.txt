@@ -32,3 +32,5 @@ openpyxl
 unstructured
 python-docx
 httpx
+
+python-multipart
