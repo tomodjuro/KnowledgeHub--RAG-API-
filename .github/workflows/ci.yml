@@ -25,6 +25,10 @@ jobs:
         pip install -r requirements.txt
         pip install pytest
 
+    - name: Run Ingest
+      run: |
+        python ingest.py
+
     - name: Run E2E Tests
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

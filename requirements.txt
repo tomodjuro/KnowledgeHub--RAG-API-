@@ -22,3 +22,5 @@ unstructured
 # Testing & Utilities
 pytest
 python-dotenv
+
+pandas
