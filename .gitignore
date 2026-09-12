@@ -1,0 +1,15 @@
+# Virtual environment
+RAG_venv/
+venv/
+env/
+
+# Environment variables (secrets)
+.env
+*.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Vector database local storage
+chroma_db/
