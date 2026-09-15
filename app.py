@@ -1,25 +1,25 @@
 import streamlit as st
 import requests
 
-# Konfiguracija stranice
-st.set_page_config(page_title="Hub Api Chat", page_icon="🧠", layout="centered")
+# Page configuration
+st.set_page_config(page_title="Hub API Chat", page_icon="🧠", layout="centered")
 
 API_STREAM_URL = "http://localhost:8000/api/v1/query-stream"
 
 st.title("🧠 Hub Assistant")
-st.caption("Postavite pitanje i dobit ćete odgovor na temelju internih dokumenata iz tvrtke.")
+st.caption("Ask a question and receive answers based on internal company documents.")
 
-# Inicijalizacija povijesti razgovora u session state-u
+# Initialize chat history in session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Prikaz svih prethodnih poruka iz memorije sesije
+# Display previous messages from session memory
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Unos novog pitanja od strane korisnika
-if prompt := st.chat_input("Napišite vaše pitanje ovdje..."):
+# User prompt input
+if prompt := st.chat_input("Write your question here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -38,10 +38,10 @@ if prompt := st.chat_input("Napišite vaše pitanje ovdje..."):
                         if chunk:
                             yield chunk
                 else:
-                    yield f"❌ Greška na poslužitelju: {response.status_code}"
+                    yield f"❌ Server error: {response.status_code}"
             except Exception as e:
-                yield f"❌ Greška u spajanju: {str(e)}"
+                yield f"❌ Connection error: {str(e)}"
 
-        # st.write_stream automatski ispisuje riječ po riječ i vraća puni tekst
+        # st.write_stream automatically renders word-by-word and returns the full response text
         full_response = st.write_stream(stream_generator())
         st.session_state.messages.append({"role": "assistant", "content": full_response})
