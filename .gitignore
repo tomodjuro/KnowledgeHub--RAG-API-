@@ -1,15 +1,17 @@
-# Virtual environment
+# Virtualno okruženje
 RAG_venv/
 venv/
-env/
+ENV/
 
-# Environment variables (secrets)
+# Osjetljivi podaci (API ključevi)
 .env
-*.env
 
-# Python cache files
-__pycache__/
-*.py[cod]
-
-# Vector database local storage
+# Vektorska baza i privremene datoteke
 chroma_db/
+*.log
+__pycache__/
+.pytest_cache/
+
+# Dokumenti iz docs mape (ne šalji privatne dokumente na javni repo)
+docs/*
+!docs/.gitkeep

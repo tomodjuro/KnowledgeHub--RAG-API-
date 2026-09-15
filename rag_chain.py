@@ -18,22 +18,27 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
-# Postavke putanja
-DOCS_DIR = "./docs"
-CHROMA_DIR = "./chroma_db"
+# Postavke putanja (apsolutno razrješavanje za stabilnost servisa)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOCS_DIR = os.path.join(BASE_DIR, "docs")
+CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")
 
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
+def get_vector_store():
+    """Helper za dohvat Chroma baze."""
+    embeddings = get_embeddings()
+    return Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+
 def get_rag_chain():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY nije pronađen u .env datoteci!")
 
-    embeddings = get_embeddings()
-    vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    vector_store = get_vector_store()
     retriever = vector_store.as_retriever(search_kwargs={"k": 2})
 
     llm = ChatGroq(
@@ -63,11 +68,10 @@ def _load_excel_file(file_path: str):
     documents = []
     
     for sheet_name, df in excel_data.items():
-        # Pretvaranje tablice u tekstualni format pogodan za RAG
         text_content = f"Radni list (Sheet): {sheet_name}\n" + df.to_string(index=False)
         doc = Document(
             page_content=text_content,
-            metadata={"source": file_path, "sheet": sheet_name}
+            metadata={"source": os.path.basename(file_path), "sheet": sheet_name}
         )
         documents.append(doc)
     return documents
@@ -90,21 +94,47 @@ def _get_documents_for_file(file_path: str):
     else:
         raise ValueError(f"Nepodržani format datoteke: {ext}")
 
+def delete_doc_from_chroma(filename: str) -> int:
+    """Pronalazi i briše sve vektorske fragmente povezane s datotekom iz ChromaDB baze."""
+    try:
+        vector_store = get_vector_store()
+        
+        # Tražimo po nazivu datoteke
+        results = vector_store.get(where={"source": filename})
+        ids_to_delete = results.get("ids", [])
+        
+        if ids_to_delete:
+            vector_store.delete(ids=ids_to_delete)
+            print(f"[CHROMA] Uspješno obrisano {len(ids_to_delete)} fragmenta za datoteku: {filename}")
+            return len(ids_to_delete)
+        
+        print(f"[CHROMA] Nisu pronađeni vektori za datoteku: {filename}")
+        return 0
+    except Exception as e:
+        print(f"[CHROMA ERROR] Greška pri brisanju dokumenta {filename}: {e}")
+        return 0
+
 def process_and_index_file(file_path: str):
     """Pozadinska funkcija za indeksiranje pojedinačne datoteke u Chroma bazu."""
+    filename = os.path.basename(file_path)
     try:
         documents = _get_documents_for_file(file_path)
+
+        # Osiguravamo uniforman metadata 'source' (samo naziv datoteke)
+        for doc in documents:
+            doc.metadata["source"] = filename
+
+        # Ako datoteka već postoji u bazi, brišemo stare vektore prije dodavanja novih
+        delete_doc_from_chroma(filename)
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = text_splitter.split_documents(documents)
 
-        embeddings = get_embeddings()
-        vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-        
+        vector_store = get_vector_store()
         vector_store.add_documents(chunks)
-        print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {file_path}")
+        print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
     except Exception as e:
-        print(f"[BACKGROUND TASK ERROR] Greška pri obradi {file_path}: {e}")
+        print(f"[BACKGROUND TASK ERROR] Greška pri obradi {filename}: {e}")
 
 def reindex_all_docs():
     """Prolazi kroz cijelu ./docs mapu i indeksira sve podržane dokumente."""
@@ -113,6 +143,8 @@ def reindex_all_docs():
 
     for root, _, files in os.walk(DOCS_DIR):
         for file in files:
+            if file.startswith("~$") or file.startswith("."):
+                continue
             ext = os.path.splitext(file)[1].lower()
             if ext in supported_extensions:
                 file_path = os.path.join(root, file)
@@ -120,3 +152,72 @@ def reindex_all_docs():
                 files_processed += 1
 
     print(f"[REINDEX] Reindeksiranje završeno. Obrađeno datoteka: {files_processed}")
+
+
+def process_and_index_file(file_path: str):
+    """Pozadinska funkcija za indeksiranje pojedinačne datoteke u Chroma bazu."""
+    filename = os.path.basename(file_path)
+    try:
+        documents = _get_documents_for_file(file_path)
+        file_mtime = os.path.getmtime(file_path)
+
+        # Osiguravamo uniforman metadata 'source' i čuvamo timestamp zadnje promjene
+        for doc in documents:
+            doc.metadata["source"] = filename
+            doc.metadata["last_modified"] = file_mtime
+
+        # Ako datoteka već postoji u bazi, brišemo stare vektore prije dodavanja novih
+        delete_doc_from_chroma(filename)
+
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = text_splitter.split_documents(documents)
+
+        vector_store = get_vector_store()
+        vector_store.add_documents(chunks)
+        print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
+    except Exception as e:
+        print(f"[BACKGROUND TASK ERROR] Greška pri obradi {filename}: {e}")
+
+def sync_missing_or_modified_docs():
+    """Prolazi kroz docs/ i indeksira SAMO nove ili izmijenjene datoteke."""
+    supported_extensions = {".pdf", ".txt", ".md", ".docx", ".doc", ".xlsx", ".xls"}
+    vector_store = get_vector_store()
+    
+    # 1. Dohvaćamo sve postojeće 'source' i 'last_modified' podatke iz ChromaDB-a
+    indexed_files = {}
+    try:
+        existing_docs = vector_store.get(include=["metadatas"])
+        if existing_docs and "metadatas" in existing_docs:
+            for meta in existing_docs["metadatas"]:
+                if meta and "source" in meta:
+                    src = meta["source"]
+                    mtime = meta.get("last_modified", 0)
+                    # Čuvamo najnoviji zabilježeni mtime za svaku datoteku
+                    indexed_files[src] = max(indexed_files.get(src, 0), mtime)
+    except Exception as e:
+        print(f"[SYNC WARNING] Nije moguće dohvatiti postojeće metapodatke iz baze: {e}")
+
+    # 2. Provjeravamo datoteke s diska
+    files_to_update = []
+    for root, _, files in os.walk(DOCS_DIR):
+        for file in files:
+            if file.startswith("~$") or file.startswith("."):
+                continue
+            
+            ext = os.path.splitext(file)[1].lower()
+            if ext in supported_extensions:
+                file_path = os.path.join(root, file)
+                disk_mtime = os.path.getmtime(file_path)
+                
+                # Datoteka se indeksira ako ne postoji u bazi ILI ako je novija na disku
+                if file not in indexed_files or disk_mtime > indexed_files[file]:
+                    files_to_update.append(file_path)
+
+    # 3. Indeksiramo samo one koje zahtijevaju ažuriranje
+    if files_to_update:
+        print(f"[SYNC] Pronađeno {len(files_to_update)} novih/izmijenjenih datoteka. Pokrećem indeksiranje...")
+        for file_path in files_to_update:
+            process_and_index_file(file_path)
+        print("[SYNC] Sinkronizacija uspješno završena.")
+    else:
+        print("[SYNC] Sve datoteke u docs/ su ažurne. Nema potrebe za indeksiranjem.")

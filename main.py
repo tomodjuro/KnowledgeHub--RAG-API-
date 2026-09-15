@@ -1,71 +1,111 @@
 import os
 import shutil
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+import asyncio
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from rag_chain import get_rag_chain, process_and_index_file, reindex_all_docs, DOCS_DIR
+from contextlib import asynccontextmanager
 
-app = FastAPI(
-    title="Engineering Intelligence Hub API",
-    version="1.0.0",
-    description="Production-ready RAG API s asinkronim indeksiranjem i masovnim reindeksiranjem."
+from rag_chain import (
+    get_rag_chain,
+    process_and_index_file,
+    reindex_all_docs,
+    sync_missing_or_modified_docs,  # <--- Dodano
+    delete_doc_from_chroma,
+    DOCS_DIR
 )
 
-rag_chain = get_rag_chain()
+
+
+# --- STARTUP HOOK ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Kôd koji se izvršava pri POKRETANJU API-ja
+    print("[STARTUP] API poslužitelj pokrenut. Pokrećem pametnu provjeru dokumenata...")
+    asyncio.create_task(asyncio.to_thread(sync_missing_or_modified_docs))
+    
+    yield  # Ovdje API radi i prima zahtjeve
+    
+    # Kôd koji se izvršava pri GAŠENJU API-ja (ako zatreba)
+    print("[SHUTDOWN] API poslužitelj se gasi...")
+
+
+app = FastAPI(
+    title="DocuBrain API",
+    description="RAG-based Document Management & Query API",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 class QueryRequest(BaseModel):
     question: str
 
-@app.get("/")
-def home():
-    return {"status": "RAG API je aktivan", "version": "1.0.0"}
+class QueryResponse(BaseModel):
+    answer: str
+    sources: list
 
-@app.post("/api/query")
-def ask_question(request: QueryRequest):
+@app.get("/")
+def read_root():
+    return {"message": "DocuBrain API is running."}
+
+@app.post("/api/v1/query", response_model=QueryResponse)
+async def query_rag(request: QueryRequest):
     try:
+        rag_chain = get_rag_chain()
         response = rag_chain.invoke({"input": request.question})
-        sources = [doc.metadata.get("source", "Nepoznato") for doc in response.get("context", [])]
         
-        return {
-            "answer": response["answer"],
-            "sources": list(set(sources))
-        }
+        sources = []
+        if "context" in response:
+            for doc in response["context"]:
+                source_name = doc.metadata.get("source", "Nepoznato")
+                if source_name not in sources:
+                    sources.append(source_name)
+
+        return QueryResponse(
+            answer=response["answer"],
+            sources=sources
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Greška pri obradi upita: {str(e)}")
 
 @app.post("/api/v1/upload", status_code=202)
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """
-    Sprema prenesenu datoteku (.pdf, .md, .txt, .docx, .xlsx) i pokreće pozadinsko indeksiranje.
-    """
-    allowed_extensions = {".md", ".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xls"}
-    ext = os.path.splitext(file.filename)[1].lower()
-    
-    if ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400, 
-            detail="Podržani su samo .pdf, .md, .txt, .docx i .xlsx formati."
-        )
+    if not os.path.exists(DOCS_DIR):
+        os.makedirs(DOCS_DIR)
 
     file_path = os.path.join(DOCS_DIR, file.filename)
-
+    
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     background_tasks.add_task(process_and_index_file, file_path)
 
     return {
-        "message": f"Datoteka '{file.filename}' zaprimljena. Indeksiranje se izvodi u pozadini.",
-        "filename": file.filename,
+        "message": f"Datoteka '{file.filename}' je uspješno učitana i spremljena za indeksiranje.",
+        "status": "processing"
+    }
+
+@app.delete("/api/v1/documents/{filename}", status_code=202)
+async def delete_document(filename: str, background_tasks: BackgroundTasks):
+    file_path = os.path.join(DOCS_DIR, filename)
+    
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            print(f"[API] Datoteka obrisana s diska: {filename}")
+        except Exception as e:
+            print(f"[API WARNING] Greška pri brisanju s diska: {e}")
+
+    background_tasks.add_task(delete_doc_from_chroma, filename)
+
+    return {
+        "message": f"Zahtjev za brisanje datoteke '{filename}' zaprimljen.",
         "status": "processing"
     }
 
 @app.post("/api/v1/reindex", status_code=202)
 async def reindex_documents(background_tasks: BackgroundTasks):
-    """
-    Pokreće pozadinsko reindeksiranje svih dokumenata iz ./docs mape.
-    """
     background_tasks.add_task(reindex_all_docs)
     return {
-        "message": "Pokrenuto je reindeksiranje svih dokumenata u pozadini.",
+        "message": "Pokrenuto potpuno reindeksiranje svih dokumenata u pozadini.",
         "status": "processing"
     }
