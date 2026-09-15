@@ -22,7 +22,7 @@ Imagine joining a new company where all guidelines, rules, code, and documentati
 - **Collects & Reads Documents:** Automatically watches and processes internal technical documentation and code.
 - **Smart Ingestion & Syncing:** A smart startup hook checks modified or missing files on disk and indexes only what changed.
 - **Token-by-Token Streaming:** Delivers real-time AI responses directly into the Streamlit UI as tokens are generated.
-- **Centralized GUI Control:** A unified desktop control panel (`gui_control.py`) manages API, Watcher, and UI services with reliable process termination.
+- **Centralized GUI Control:** A unified desktop control panel (`gui_control.py`) manages the API, Watcher, and UI services with reliable process termination.
 - **Answers Questions with Citations:** Instantly retrieves context chunks and provides clear answers in English or Croatian with exact source citations.
 
 ---
@@ -124,7 +124,7 @@ This is the recommended method. Launch the Tkinter control panel to manage all s
 python gui_control.py
 ```
 
-Click **“Pokreni Sve”** to launch the API, Watcher, and Streamlit UI simultaneously.
+Click **“Start All”** to launch the API, Watcher, and Streamlit UI simultaneously.
 
 ### Option 2: Manual Service Startup
 
