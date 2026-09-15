@@ -1,6 +1,7 @@
 import os
 import shutil
 from dotenv import load_dotenv
+from typing import Generator
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
@@ -33,19 +34,22 @@ def get_vector_store():
     embeddings = get_embeddings()
     return Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
-def get_rag_chain():
+def get_llm():
+    """Helper za inicijalizaciju LLM modela."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY nije pronađen u .env datoteci!")
-
-    vector_store = get_vector_store()
-    retriever = vector_store.as_retriever(search_kwargs={"k": 2})
-
-    llm = ChatGroq(
+    
+    return ChatGroq(
         temperature=0, 
         model_name="openai/gpt-oss-120b",
         groq_api_key=api_key
     )
+
+def get_rag_chain():
+    vector_store = get_vector_store()
+    retriever = vector_store.as_retriever(search_kwargs={"k": 2})
+    llm = get_llm()
 
     system_prompt = (
         "Ti si stručni tehnički asistent. Odgovaraj na pitanja isključivo na temelju priloženog konteksta. "
@@ -99,7 +103,6 @@ def delete_doc_from_chroma(filename: str) -> int:
     try:
         vector_store = get_vector_store()
         
-        # Tražimo po nazivu datoteke
         results = vector_store.get(where={"source": filename})
         ids_to_delete = results.get("ids", [])
         
@@ -115,16 +118,16 @@ def delete_doc_from_chroma(filename: str) -> int:
         return 0
 
 def process_and_index_file(file_path: str):
-    """Pozadinska funkcija za indeksiranje pojedinačne datoteke u Chroma bazu."""
+    """Pozadinska funkcija za indeksiranje pojedinačne datoteka u Chroma bazu sa spremanjem mtime."""
     filename = os.path.basename(file_path)
     try:
         documents = _get_documents_for_file(file_path)
+        file_mtime = os.path.getmtime(file_path)
 
-        # Osiguravamo uniforman metadata 'source' (samo naziv datoteke)
         for doc in documents:
             doc.metadata["source"] = filename
+            doc.metadata["last_modified"] = file_mtime
 
-        # Ako datoteka već postoji u bazi, brišemo stare vektore prije dodavanja novih
         delete_doc_from_chroma(filename)
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
@@ -153,37 +156,11 @@ def reindex_all_docs():
 
     print(f"[REINDEX] Reindeksiranje završeno. Obrađeno datoteka: {files_processed}")
 
-
-def process_and_index_file(file_path: str):
-    """Pozadinska funkcija za indeksiranje pojedinačne datoteke u Chroma bazu."""
-    filename = os.path.basename(file_path)
-    try:
-        documents = _get_documents_for_file(file_path)
-        file_mtime = os.path.getmtime(file_path)
-
-        # Osiguravamo uniforman metadata 'source' i čuvamo timestamp zadnje promjene
-        for doc in documents:
-            doc.metadata["source"] = filename
-            doc.metadata["last_modified"] = file_mtime
-
-        # Ako datoteka već postoji u bazi, brišemo stare vektore prije dodavanja novih
-        delete_doc_from_chroma(filename)
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = text_splitter.split_documents(documents)
-
-        vector_store = get_vector_store()
-        vector_store.add_documents(chunks)
-        print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
-    except Exception as e:
-        print(f"[BACKGROUND TASK ERROR] Greška pri obradi {filename}: {e}")
-
 def sync_missing_or_modified_docs():
     """Prolazi kroz docs/ i indeksira SAMO nove ili izmijenjene datoteke."""
     supported_extensions = {".pdf", ".txt", ".md", ".docx", ".doc", ".xlsx", ".xls"}
     vector_store = get_vector_store()
     
-    # 1. Dohvaćamo sve postojeće 'source' i 'last_modified' podatke iz ChromaDB-a
     indexed_files = {}
     try:
         existing_docs = vector_store.get(include=["metadatas"])
@@ -192,12 +169,10 @@ def sync_missing_or_modified_docs():
                 if meta and "source" in meta:
                     src = meta["source"]
                     mtime = meta.get("last_modified", 0)
-                    # Čuvamo najnoviji zabilježeni mtime za svaku datoteku
                     indexed_files[src] = max(indexed_files.get(src, 0), mtime)
     except Exception as e:
         print(f"[SYNC WARNING] Nije moguće dohvatiti postojeće metapodatke iz baze: {e}")
 
-    # 2. Provjeravamo datoteke s diska
     files_to_update = []
     for root, _, files in os.walk(DOCS_DIR):
         for file in files:
@@ -209,11 +184,9 @@ def sync_missing_or_modified_docs():
                 file_path = os.path.join(root, file)
                 disk_mtime = os.path.getmtime(file_path)
                 
-                # Datoteka se indeksira ako ne postoji u bazi ILI ako je novija na disku
                 if file not in indexed_files or disk_mtime > indexed_files[file]:
                     files_to_update.append(file_path)
 
-    # 3. Indeksiramo samo one koje zahtijevaju ažuriranje
     if files_to_update:
         print(f"[SYNC] Pronađeno {len(files_to_update)} novih/izmijenjenih datoteka. Pokrećem indeksiranje...")
         for file_path in files_to_update:
@@ -221,3 +194,31 @@ def sync_missing_or_modified_docs():
         print("[SYNC] Sinkronizacija uspješno završena.")
     else:
         print("[SYNC] Sve datoteke u docs/ su ažurne. Nema potrebe za indeksiranjem.")
+
+def generate_rag_stream(question: str) -> Generator[str, None, None]:
+    """Generira tok tokena u realnom vremenu (streaming) iz LLM-a."""
+    # 1. Dohvaćanje dokumenata iz Chroma baze
+    vector_store = get_vector_store()
+    retriever = vector_store.as_retriever(search_kwargs={"k": 2})
+    docs = retriever.invoke(question)
+    
+    context = "\n\n".join([doc.page_content for doc in docs])
+    sources = list(set([os.path.basename(doc.metadata.get("source", "Nepoznato")) for doc in docs]))
+
+    # 2. Sastavljanje prompta
+    prompt = (
+        "Ti si stručni tehnički asistent. Odgovaraj na pitanja isključivo na temelju priloženog konteksta. "
+        "Ako u kontekstu nema odgovora, jasno reci da ne znaš.\n\n"
+        f"Kontekst:\n{context}\n\nPitanje: {question}\nOdgovor:"
+    )
+
+    # 3. Inicijalizacija i streamanje iz LLM-a
+    llm = get_llm()
+    for chunk in llm.stream(prompt):
+        content = getattr(chunk, "content", str(chunk))
+        yield content
+
+    # 4. Slanje izvora na samom kraju odgovora
+    if sources:
+        sources_formatted = "\n".join([f"* `{src}`" for src in sources])
+        yield f"\n\n**Izvori:**\n{sources_formatted}"

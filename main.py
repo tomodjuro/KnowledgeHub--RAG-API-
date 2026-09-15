@@ -2,18 +2,19 @@ import os
 import shutil
 import asyncio
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from rag_chain import (
     get_rag_chain,
+    generate_rag_stream,
     process_and_index_file,
     reindex_all_docs,
-    sync_missing_or_modified_docs,  # <--- Dodano
+    sync_missing_or_modified_docs,
     delete_doc_from_chroma,
     DOCS_DIR
 )
-
 
 
 # --- STARTUP HOOK ---
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="DocuBrain API",
+    title="Hub API",
     description="RAG-based Document Management & Query API",
     version="1.0.0",
     lifespan=lifespan
@@ -47,6 +48,7 @@ class QueryResponse(BaseModel):
 def read_root():
     return {"message": "DocuBrain API is running."}
 
+# --- STANDARDNI QUERY (JSON RESPONSE) ---
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
     try:
@@ -67,6 +69,18 @@ async def query_rag(request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Greška pri obradi upita: {str(e)}")
 
+# --- STREAMING QUERY (TOKEN-BY-TOKEN RESPONSE) ---
+@app.post("/api/v1/query-stream")
+async def query_rag_stream(request: QueryRequest):
+    try:
+        return StreamingResponse(
+            generate_rag_stream(request.question),
+            media_type="text/event-stream"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Greška pri pokretanju streamanja: {str(e)}")
+
+# --- MANAGEMENT ENDPOINTS ---
 @app.post("/api/v1/upload", status_code=202)
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     if not os.path.exists(DOCS_DIR):
