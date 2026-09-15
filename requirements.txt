@@ -1,6 +1,8 @@
 # Web Framework & API
 fastapi
 uvicorn
+python-multipart
+httpx
 
 # RAG & LLM Framework
 langchain
@@ -17,20 +19,15 @@ chromadb
 # Document Loaders & Parsers
 pypdf
 docx2txt
+python-docx
 openpyxl
+pandas
 unstructured
+
+# Frontend & File System Monitoring
+streamlit
+watchdog
 
 # Testing & Utilities
 pytest
 python-dotenv
-
-# extensions
-pandas
-pypdf 
-docx2txt
-openpyxl
-unstructured
-python-docx
-httpx
-
-python-multipart
