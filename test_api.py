@@ -28,7 +28,7 @@ def test_reindex_endpoint():
 
 def test_query_rag():
     payload = {"question": "Što se nalazi u testnim dokumentima?"}
-    response = client.post("/api/query", json=payload)
+    response = client.post("/api/v1/query", json=payload)
     
     assert response.status_code == 200
     assert "answer" in response.json() or "response" in response.json()
