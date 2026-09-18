@@ -179,6 +179,7 @@ Create a .env file in the root directory: GROQ_API_KEY=your_groq_api_key_here
     Option A: Via Control Panel (Recommended)
     Run the lightweight desktop control script in terminal: python gui_control_docker.py # or make desktop shortcut to this script
     Click "⚡ Start Stack" to build and spin up all Docker containers (FastAPI, Streamlit UI, and Folder Watcher) in the background.
+    
     Option B: Directly via Docker CLI, in terminal type:  docker compose up -d --build
     Accessing Services:
 
