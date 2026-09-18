@@ -1,10 +1,12 @@
+import os
 import streamlit as st
 import requests
 
 # Page configuration
 st.set_page_config(page_title="Hub API Chat", page_icon="🧠", layout="centered")
 
-API_STREAM_URL = "http://localhost:8000/api/v1/query-stream"
+# Čita Docker adresu ili se vraća na localhost za lokalno pokretanje
+API_STREAM_URL = os.getenv("API_STREAM_URL", "http://localhost:8000/api/v1/query-stream")
 
 st.title("🧠 Hub Assistant")
 st.caption("Ask a question and receive answers based on internal company documents.")
