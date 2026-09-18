@@ -179,13 +179,27 @@ Create a .env file in the root directory: GROQ_API_KEY=your_groq_api_key_here
     Option A: Via Control Panel (Recommended)
     Run the lightweight desktop control script in terminal: python gui_control_docker.py # or make desktop shortcut to this script
     Click "⚡ Start Stack" to build and spin up all Docker containers (FastAPI, Streamlit UI, and Folder Watcher) in the background.
-    
+
     Option B: Directly via Docker CLI, in terminal type:  docker compose up -d --build
     Accessing Services:
 
     Streamlit Chat UI: http://localhost:8501
 
     FastAPI Backend & Docs: http://localhost:8000/docs
+
+---
+
+**Scaling for High Concurrency (Multi-User Optimization -for 5+ team)**
+
+To handle multiple simultaneous users uploading files and querying the system without performance degradation, apply the following optimizations:
+
+    - Production-Grade Vector Database: Replace local ChromaDB (SQLite-backed) with a client-server vector database such as Qdrant, Milvus, or PGVector running as a dedicated Docker service to prevent database lock issues during concurrent write operations.
+
+    - Asynchronous Task Queue: Offload heavy document ingestion and embedding processing from FastAPI BackgroundTasks to a distributed queue system like Celery with Redis. This prevents high CPU/RAM usage during file parsing from blocking active user queries.
+
+    - Multi-Worker Uvicorn Deployment: Increase the number of Uvicorn worker processes in docker-compose.yml to utilize multiple CPU cores for handling API requests: in YAML edit to:  command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+
+    - Stateless Session Management: Maintain session states exclusively on the frontend or in a Redis cache to allow seamless horizontal scaling of backend API instances behind a load balancer (e.g., NGINX).
 
 ---
 
