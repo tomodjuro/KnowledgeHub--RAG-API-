@@ -3,15 +3,22 @@ import sys
 import time
 import logging
 import requests
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Dinamičko određivanje korijenske mape (podržava i .py i PyInstaller .exe okruženje)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 LOG_FILE = os.path.join(BASE_DIR, "watcher.log")
 WATCHED_FOLDER = os.path.join(BASE_DIR, "docs")
 
-API_UPLOAD_URL = "http://localhost:8000/api/v1/upload"
-API_DELETE_URL = "http://localhost:8000/api/v1/documents"
+API_HOST = os.getenv("API_HOST", "localhost")
+
+API_UPLOAD_URL = f"http://{API_HOST}:8000/api/v1/upload"
+API_DELETE_URL = f"http://{API_HOST}:8000/api/v1/documents"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +31,18 @@ logging.basicConfig(
 
 class DocumentHandler(FileSystemEventHandler):
 
+    def __init__(self):
+        super().__init__()
+        self.last_processed = {}
+
+    def should_process(self, file_path, cooldown=3):
+        now = time.time()
+        if file_path in self.last_processed:
+            if now - self.last_processed[file_path] < cooldown:
+                return False
+        self.last_processed[file_path] = now
+        return True
+
     def is_ignored(self, path):
         filename = os.path.basename(path)
         return (
@@ -35,6 +54,10 @@ class DocumentHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory or self.is_ignored(event.src_path):
             return
+        
+        if not self.should_process(event.src_path):
+            return
+
         filename = os.path.basename(event.src_path)
         logging.info(f"[NOVA DATOTEKA] Detektirana datoteka: {filename}")
         time.sleep(1)
@@ -43,6 +66,10 @@ class DocumentHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory or self.is_ignored(event.src_path):
             return
+
+        if not self.should_process(event.src_path):
+            return
+
         filename = os.path.basename(event.src_path)
         logging.info(f"[IZMJENA DATOTEKE] Detektirana promjena: {filename}")
         time.sleep(1)
@@ -69,7 +96,6 @@ class DocumentHandler(FileSystemEventHandler):
         time.sleep(1)
         self.upload_file(event.dest_path)
 
-    # --- RETRY LOGIKA ZA UPLOAD ---
     def upload_file(self, file_path, retries=3, delay=5):
         filename = os.path.basename(file_path)
         
@@ -88,9 +114,8 @@ class DocumentHandler(FileSystemEventHandler):
                 logging.warning(f"[RETRY {attempt}/{retries}] API nedostupan za {filename}. Ponovni pokušaj za {delay}s... ({e})")
                 time.sleep(delay)
 
-        logging.error(f"[FAILED] Datoteka {filename} nije poslana na API nakon {retries} pokušaja. Bit će ponovno sinkronizirana pri pokretanju API-ja.")
+        logging.error(f"[FAILED] Datoteka {filename} nije poslana na API nakon {retries} pokušaja.")
 
-    # --- RETRY LOGIKA ZA DELETE ---
     def delete_file_from_api(self, filename, retries=3, delay=5):
         url = f"{API_DELETE_URL}/{filename}"
         
@@ -112,10 +137,11 @@ if __name__ == "__main__":
     os.makedirs(WATCHED_FOLDER, exist_ok=True)
     
     event_handler = DocumentHandler()
-    observer = Observer()
+    # PollingObserver eksplicitno provjerava stanje mape svake 2 sekunde
+    observer = Observer(timeout=2)
     observer.schedule(event_handler, path=WATCHED_FOLDER, recursive=True)
     
-    logging.info(f"Pokrenut napredni watcher servis s retry logikom. Pratim mapu: {WATCHED_FOLDER}")
+    logging.info(f"Pokrenut napredni watcher servis. Pratim mapu: {WATCHED_FOLDER}")
     observer.start()
 
     try:

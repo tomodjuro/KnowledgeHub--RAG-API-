@@ -1,12 +1,14 @@
 import os
 import shutil
 import asyncio
+import logging
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from rag_chain import (
+    get_vector_store,
     get_rag_chain,
     generate_rag_stream,
     process_and_index_file,
@@ -16,19 +18,12 @@ from rag_chain import (
     DOCS_DIR
 )
 
-
-# --- STARTUP HOOK ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Kôd koji se izvršava pri POKRETANJU API-ja
-    print("[STARTUP] API poslužitelj pokrenut. Pokrećem pametnu provjeru dokumenata...")
+    print("[STARTUP] API server started. Running smart document synchronization...")
     asyncio.create_task(asyncio.to_thread(sync_missing_or_modified_docs))
-    
-    yield  # Ovdje API radi i prima zahtjeve
-    
-    # Kôd koji se izvršava pri GAŠENJU API-ja (ako zatreba)
-    print("[SHUTDOWN] API poslužitelj se gasi...")
-
+    yield
+    print("[SHUTDOWN] API server shutting down...")
 
 app = FastAPI(
     title="Hub API",
@@ -48,7 +43,6 @@ class QueryResponse(BaseModel):
 def read_root():
     return {"message": "DocuBrain API is running."}
 
-# --- STANDARDNI QUERY (JSON RESPONSE) ---
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
     try:
@@ -58,18 +52,18 @@ async def query_rag(request: QueryRequest):
         sources = []
         if "context" in response:
             for doc in response["context"]:
-                source_name = doc.metadata.get("source", "Nepoznato")
-                if source_name not in sources:
-                    sources.append(source_name)
+                source_name = doc.metadata.get("source", "Unknown")
+                source_basename = os.path.basename(str(source_name))
+                if source_basename not in sources:
+                    sources.append(source_basename)
 
         return QueryResponse(
             answer=response["answer"],
             sources=sources
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Greška pri obradi upita: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Query processing error: {str(e)}")
 
-# --- STREAMING QUERY (TOKEN-BY-TOKEN RESPONSE) ---
 @app.post("/api/v1/query-stream")
 async def query_rag_stream(request: QueryRequest):
     try:
@@ -78,9 +72,31 @@ async def query_rag_stream(request: QueryRequest):
             media_type="text/event-stream"
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Greška pri pokretanju streamanja: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Streaming initialization error: {str(e)}")
 
-# --- MANAGEMENT ENDPOINTS ---
+@app.get("/api/v1/documents")
+def get_all_documents():
+    """Returns a list of all currently indexed files in ChromaDB."""
+    try:
+        vector_store = get_vector_store()
+        collection_data = vector_store._collection.get(include=["metadatas"])
+        metadatas = collection_data.get("metadatas", [])
+        
+        filenames = set()
+        for meta in metadatas:
+            if meta:
+                src = meta.get("source") or meta.get("file_path") or meta.get("filename")
+                if src:
+                    filenames.add(os.path.basename(str(src)))
+        
+        return {
+            "documents": sorted(list(filenames)),
+            "count": len(filenames)
+        }
+    except Exception as e:
+        logging.error(f"Error fetching document list: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/v1/upload", status_code=202)
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     if not os.path.exists(DOCS_DIR):
@@ -94,7 +110,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     background_tasks.add_task(process_and_index_file, file_path)
 
     return {
-        "message": f"Datoteka '{file.filename}' je uspješno učitana i spremljena za indeksiranje.",
+        "message": f"File '{file.filename}' uploaded successfully and queued for indexing.",
         "status": "processing"
     }
 
@@ -105,14 +121,14 @@ async def delete_document(filename: str, background_tasks: BackgroundTasks):
     if os.path.exists(file_path):
         try:
             os.remove(file_path)
-            print(f"[API] Datoteka obrisana s diska: {filename}")
+            print(f"[API] File deleted from disk: {filename}")
         except Exception as e:
-            print(f"[API WARNING] Greška pri brisanju s diska: {e}")
+            print(f"[API WARNING] Error deleting file from disk: {e}")
 
     background_tasks.add_task(delete_doc_from_chroma, filename)
 
     return {
-        "message": f"Zahtjev za brisanje datoteke '{filename}' zaprimljen.",
+        "message": f"Deletion request for '{filename}' received.",
         "status": "processing"
     }
 
@@ -120,6 +136,6 @@ async def delete_document(filename: str, background_tasks: BackgroundTasks):
 async def reindex_documents(background_tasks: BackgroundTasks):
     background_tasks.add_task(reindex_all_docs)
     return {
-        "message": "Pokrenuto potpuno reindeksiranje svih dokumenata u pozadini.",
+        "message": "Full background re-indexing initiated.",
         "status": "processing"
     }

@@ -1,5 +1,7 @@
 import os
+import sys
 import shutil
+import logging
 from dotenv import load_dotenv
 from typing import Generator
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -17,13 +19,16 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-load_dotenv()
+# Dinamičko određivanje korijenske mape (podržava i .py i PyInstaller .exe okruženje)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Postavke putanja (apsolutno razrješavanje za stabilnost servisa)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE_DIR, "docs")
 CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")
 
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 def get_embeddings():
@@ -103,11 +108,19 @@ def delete_doc_from_chroma(filename: str) -> int:
     try:
         vector_store = get_vector_store()
         
-        results = vector_store.get(where={"source": filename})
-        ids_to_delete = results.get("ids", [])
+        # 1. Dohvaćanje svih dokumenata za provjeru imena datoteke neovisno o prefiksima putanje
+        existing_docs = vector_store._collection.get(include=["metadatas"])
+        ids_to_delete = []
         
+        if existing_docs and "metadatas" in existing_docs:
+            for doc_id, meta in zip(existing_docs["ids"], existing_docs["metadatas"]):
+                if meta:
+                    src = meta.get("source") or meta.get("file_path") or meta.get("filename") or meta.get("file_name")
+                    if src and os.path.basename(str(src)) == filename:
+                        ids_to_delete.append(doc_id)
+
         if ids_to_delete:
-            vector_store.delete(ids=ids_to_delete)
+            vector_store._collection.delete(ids=ids_to_delete)
             print(f"[CHROMA] Uspješno obrisano {len(ids_to_delete)} fragmenta za datoteku: {filename}")
             return len(ids_to_delete)
         
@@ -118,9 +131,13 @@ def delete_doc_from_chroma(filename: str) -> int:
         return 0
 
 def process_and_index_file(file_path: str):
-    """Pozadinska funkcija za indeksiranje pojedinačne datoteka u Chroma bazu sa spremanjem mtime."""
+    """Pozadinska funkcija za indeksiranje pojedinačne datoteke u Chroma bazu sa spremanjem mtime."""
     filename = os.path.basename(file_path)
     try:
+        # 1. Prvo brišemo postojeće fragmente iz baze
+        delete_doc_from_chroma(filename)
+
+        # 2. Učitavamo datoteku i dodajemo svježe metapodatke
         documents = _get_documents_for_file(file_path)
         file_mtime = os.path.getmtime(file_path)
 
@@ -128,11 +145,10 @@ def process_and_index_file(file_path: str):
             doc.metadata["source"] = filename
             doc.metadata["last_modified"] = file_mtime
 
-        delete_doc_from_chroma(filename)
-
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = text_splitter.split_documents(documents)
 
+        # 3. Indeksiramo nove fragmente
         vector_store = get_vector_store()
         vector_store.add_documents(chunks)
         print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
@@ -157,23 +173,31 @@ def reindex_all_docs():
     print(f"[REINDEX] Reindeksiranje završeno. Obrađeno datoteka: {files_processed}")
 
 def sync_missing_or_modified_docs():
-    """Prolazi kroz docs/ i indeksira SAMO nove ili izmijenjene datoteke."""
+    """Prolazi kroz docs/ i indeksira nove/izmijenjene, a briše obrisane datoteke iz baze."""
     supported_extensions = {".pdf", ".txt", ".md", ".docx", ".doc", ".xlsx", ".xls"}
     vector_store = get_vector_store()
     
     indexed_files = {}
+    db_filenames = set()
+    
     try:
-        existing_docs = vector_store.get(include=["metadatas"])
+        existing_docs = vector_store._collection.get(include=["metadatas"])
         if existing_docs and "metadatas" in existing_docs:
             for meta in existing_docs["metadatas"]:
-                if meta and "source" in meta:
-                    src = meta["source"]
-                    mtime = meta.get("last_modified", 0)
-                    indexed_files[src] = max(indexed_files.get(src, 0), mtime)
+                if meta:
+                    src = meta.get("source") or meta.get("file_path") or meta.get("filename")
+                    if src:
+                        fname = os.path.basename(str(src))
+                        db_filenames.add(fname)
+                        mtime = meta.get("last_modified", 0)
+                        indexed_files[fname] = max(indexed_files.get(fname, 0), mtime)
     except Exception as e:
         print(f"[SYNC WARNING] Nije moguće dohvatiti postojeće metapodatke iz baze: {e}")
 
+    # 1. Provjera novih i izmijenjenih datoteka na disku
+    disk_files = set()
     files_to_update = []
+    
     for root, _, files in os.walk(DOCS_DIR):
         for file in files:
             if file.startswith("~$") or file.startswith("."):
@@ -181,44 +205,70 @@ def sync_missing_or_modified_docs():
             
             ext = os.path.splitext(file)[1].lower()
             if ext in supported_extensions:
+                disk_files.add(file)
                 file_path = os.path.join(root, file)
                 disk_mtime = os.path.getmtime(file_path)
                 
                 if file not in indexed_files or disk_mtime > indexed_files[file]:
                     files_to_update.append(file_path)
 
+    # 2. Uklanjanje datoteka koje više ne postoje na disku
+    deleted_files = db_filenames - disk_files
+    for deleted_file in deleted_files:
+        print(f"[SYNC] Detektirano brisanje na disku, uklanjam iz baze: {deleted_file}")
+        delete_doc_from_chroma(deleted_file)
+
+    # 3. Indeksiranje novih/izmijenjenih
     if files_to_update:
         print(f"[SYNC] Pronađeno {len(files_to_update)} novih/izmijenjenih datoteka. Pokrećem indeksiranje...")
         for file_path in files_to_update:
             process_and_index_file(file_path)
         print("[SYNC] Sinkronizacija uspješno završena.")
     else:
-        print("[SYNC] Sve datoteke u docs/ su ažurne. Nema potrebe za indeksiranjem.")
+        print("[SYNC] Sve datoteke u docs/ su ažurne.")
 
 def generate_rag_stream(question: str) -> Generator[str, None, None]:
     """Generira tok tokena u realnom vremenu (streaming) iz LLM-a."""
-    # 1. Dohvaćanje dokumenata iz Chroma baze
     vector_store = get_vector_store()
-    retriever = vector_store.as_retriever(search_kwargs={"k": 2})
+    retriever = vector_store.as_retriever(search_kwargs={"k": 5})
     docs = retriever.invoke(question)
-    
-    context = "\n\n".join([doc.page_content for doc in docs])
-    sources = list(set([os.path.basename(doc.metadata.get("source", "Nepoznato")) for doc in docs]))
 
-    # 2. Sastavljanje prompta
+    if not docs:
+        yield "Nažalost, u bazi znanja nisam pronašao nikakve relevantne dokumente za vaše pitanje."
+        return
+
+    context_blocks = []
+    sources = set()
+
+    for doc in docs:
+        meta = doc.metadata or {}
+        source_path = meta.get("source") or meta.get("file_path") or meta.get("filename") or "Nepoznato"
+        source_name = os.path.basename(str(source_path))
+        
+        if source_name != "Nepoznato":
+            sources.add(source_name)
+
+        context_blocks.append(f"--- DOKUMENT: {source_name} ---\n{doc.page_content}")
+
+    full_context = "\n\n".join(context_blocks)
+
     prompt = (
-        "Ti si stručni tehnički asistent. Odgovaraj na pitanja isključivo na temelju priloženog konteksta. "
-        "Ako u kontekstu nema odgovora, jasno reci da ne znaš.\n\n"
-        f"Kontekst:\n{context}\n\nPitanje: {question}\nOdgovor:"
+        "Ti si stručni tehnički asistent za internu dokumentaciju. "
+        "Tvoj zadatak je dati detaljan, točan i strukturiran odgovor na temelju priloženih dokumenata.\n\n"
+        "UPUTE:\n"
+        "- Odgovaraj ISKLJUČIVO na temelju priloženog konteksta.\n"
+        "- Ako u kontekstu nema dovoljno informacija za potpun odgovor, jasno reci što nedostaje.\n"
+        "- Ako kontekst sadrži relevantne detalje, objasni ih jasno i temeljito.\n\n"
+        f"KONTEKST:\n{full_context}\n\n"
+        f"PITANJE: {question}\n\n"
+        "ODGOVOR:"
     )
 
-    # 3. Inicijalizacija i streamanje iz LLM-a
     llm = get_llm()
     for chunk in llm.stream(prompt):
         content = getattr(chunk, "content", str(chunk))
         yield content
 
-    # 4. Slanje izvora na samom kraju odgovora
     if sources:
-        sources_formatted = "\n".join([f"* `{src}`" for src in sources])
+        sources_formatted = "\n".join([f"* `{src}`" for src in sorted(sources)])
         yield f"\n\n**Izvori:**\n{sources_formatted}"

@@ -2,11 +2,13 @@ import os
 import streamlit as st
 import requests
 
+# Dynamic API host resolution (defaults to localhost for Windows, uses 'api' in Docker)
+API_HOST = os.getenv("API_HOST", "localhost")
+API_STREAM_URL = f"http://{API_HOST}:8000/api/v1/query-stream"
+API_DOCS_URL = f"http://{API_HOST}:8000/api/v1/documents"
+
 # Page configuration
 st.set_page_config(page_title="Hub API Chat", page_icon="🧠", layout="centered")
-
-# Čita Docker adresu ili se vraća na localhost za lokalno pokretanje
-API_STREAM_URL = os.getenv("API_STREAM_URL", "http://localhost:8000/api/v1/query-stream")
 
 st.title("🧠 Hub Assistant")
 st.caption("Ask a question and receive answers based on internal company documents.")
@@ -44,6 +46,21 @@ if prompt := st.chat_input("Write your question here..."):
             except Exception as e:
                 yield f"❌ Connection error: {str(e)}"
 
-        # st.write_stream automatically renders word-by-word and returns the full response text
         full_response = st.write_stream(stream_generator())
         st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+# Sidebar - Knowledge Base Management
+st.sidebar.title("Knowledge Base")
+
+if st.sidebar.button("Show Loaded Documents"):
+    try:
+        response = requests.get(API_DOCS_URL, timeout=5)
+        if response.status_code == 200:
+            docs = response.json().get("documents", [])
+            st.sidebar.write(f"**Total Documents ({len(docs)}):**")
+            for doc in docs:
+                st.sidebar.write(f"- `{doc}`")
+        else:
+            st.sidebar.error(f"API Error ({response.status_code}): {response.text}")
+    except Exception as e:
+        st.sidebar.error(f"Error details: {type(e).__name__} - {str(e)}")

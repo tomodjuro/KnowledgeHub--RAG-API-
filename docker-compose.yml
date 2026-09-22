@@ -35,6 +35,9 @@ services:
     command: python folder_watcher.py
     env_file:
       - .env
+    environment:
+      - API_URL=http://api:8000/api/v1/upload
+      - API_DELETE_URL=http://api:8000/api/v1/delete
     volumes:
       - ./docs:/app/docs
     depends_on:
