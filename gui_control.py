@@ -8,26 +8,48 @@ from tkinter import messagebox
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VENV_PYTHON = os.path.join(BASE_DIR, "RAG_venv", "Scripts", "python.exe")
 
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 # Global process references
 api_process = None
 watcher_process = None
 streamlit_process = None
 
+# Kept alive so the underlying file descriptors aren't closed by garbage
+# collection while the child processes are still writing to them.
+api_log_file = None
+streamlit_log_file = None
+
 # --- 1. API FUNCTIONS ---
 def start_api():
-    global api_process
+    global api_process, api_log_file
     if api_process is None or api_process.poll() is not None:
-        cmd = [VENV_PYTHON, "-m", "uvicorn", "main:app", "--reload"]
-        api_process = subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+        # NOTE: --reload was removed. Uvicorn's reloader watches the whole
+        # project directory by default, including docs/ and chroma_db/. Every
+        # time a document gets ingested it writes to chroma_db/, which the
+        # reloader saw as a "code change" and restarted the whole server —
+        # causing brief connection-refused errors in Streamlit right after
+        # any upload/reindex. Restart the GUI's API button manually after
+        # editing main.py/rag_chain.py instead.
+        cmd = [VENV_PYTHON, "-m", "uvicorn", "main:app"]
+        api_log_file = open(os.path.join(LOG_DIR, "api.log"), "a", encoding="utf-8")
+        api_process = subprocess.Popen(
+            cmd, cwd=BASE_DIR, creationflags=subprocess.CREATE_NO_WINDOW,
+            stdout=api_log_file, stderr=subprocess.STDOUT
+        )
         lbl_api_status.config(text="Status: RUNNING 🟢", fg="green")
         btn_start_api.config(state=tk.DISABLED)
         btn_stop_api.config(state=tk.NORMAL)
 
 def stop_api():
-    global api_process
+    global api_process, api_log_file
     if api_process and api_process.poll() is None:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(api_process.pid)])
         api_process = None
+        if api_log_file:
+            api_log_file.close()
+            api_log_file = None
         lbl_api_status.config(text="Status: STOPPED 🔴", fg="red")
         btn_start_api.config(state=tk.NORMAL)
         btn_stop_api.config(state=tk.DISABLED)
@@ -53,19 +75,26 @@ def stop_watcher():
 
 # --- 3. STREAMLIT FUNCTIONS ---
 def start_streamlit():
-    global streamlit_process
+    global streamlit_process, streamlit_log_file
     if streamlit_process is None or streamlit_process.poll() is not None:
         cmd = [VENV_PYTHON, "-m", "streamlit", "run", "app.py"]
-        streamlit_process = subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+        streamlit_log_file = open(os.path.join(LOG_DIR, "streamlit.log"), "a", encoding="utf-8")
+        streamlit_process = subprocess.Popen(
+            cmd, cwd=BASE_DIR, creationflags=subprocess.CREATE_NO_WINDOW,
+            stdout=streamlit_log_file, stderr=subprocess.STDOUT
+        )
         lbl_st_status.config(text="Status: RUNNING 🟢", fg="green")
         btn_start_st.config(state=tk.DISABLED)
         btn_stop_st.config(state=tk.NORMAL)
 
 def stop_streamlit():
-    global streamlit_process
+    global streamlit_process, streamlit_log_file
     if streamlit_process and streamlit_process.poll() is None:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(streamlit_process.pid)])
         streamlit_process = None
+        if streamlit_log_file:
+            streamlit_log_file.close()
+            streamlit_log_file = None
         lbl_st_status.config(text="Status: STOPPED 🔴", fg="red")
         btn_start_st.config(state=tk.NORMAL)
         btn_stop_st.config(state=tk.DISABLED)
@@ -89,10 +118,13 @@ def on_closing():
     stop_all()
     root.destroy()
 
+def open_logs_folder():
+    os.startfile(LOG_DIR)
+
 # --- GUI WINDOW ---
 root = tk.Tk()
 root.title("Hub Control Panel")
-root.geometry("460x390")
+root.geometry("460x420")
 root.resizable(False, False)
 
 # Title
@@ -147,6 +179,9 @@ btn_start_all.pack(side="left", padx=10)
 
 btn_stop_all = tk.Button(frame_actions, text="🛑 Stop All", command=stop_all, width=15, bg="#ffcdd2", font=("Arial", 9, "bold"))
 btn_stop_all.pack(side="right", padx=10)
+
+btn_open_logs = tk.Button(root, text="📄 Open Logs Folder", command=open_logs_folder, width=20)
+btn_open_logs.pack(pady=(0, 8))
 
 root.protocol("WM_DELETE_WINDOW", on_closing)
 root.mainloop()

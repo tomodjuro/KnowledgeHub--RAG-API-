@@ -18,12 +18,19 @@ from rag_chain import (
     DOCS_DIR
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".doc", ".xlsx", ".xls"}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[STARTUP] API server started. Running smart document synchronization...")
+    logging.info("[STARTUP] API server started. Running smart document synchronization...")
     asyncio.create_task(asyncio.to_thread(sync_missing_or_modified_docs))
     yield
-    print("[SHUTDOWN] API server shutting down...")
+    logging.info("[SHUTDOWN] API server shutting down...")
 
 app = FastAPI(
     title="Hub API",
@@ -99,36 +106,83 @@ def get_all_documents():
 
 @app.post("/api/v1/upload", status_code=202)
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    # Strip any directory components the client might send (path-traversal guard)
+    safe_filename = os.path.basename(file.filename or "")
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    ext = os.path.splitext(safe_filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+
     if not os.path.exists(DOCS_DIR):
         os.makedirs(DOCS_DIR)
 
-    file_path = os.path.join(DOCS_DIR, file.filename)
-    
+    file_path = os.path.join(DOCS_DIR, safe_filename)
+
+    # Defense in depth: confirm the resolved path is still inside DOCS_DIR
+    if os.path.commonpath([os.path.abspath(file_path), os.path.abspath(DOCS_DIR)]) != os.path.abspath(DOCS_DIR):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     background_tasks.add_task(process_and_index_file, file_path)
 
     return {
-        "message": f"File '{file.filename}' uploaded successfully and queued for indexing.",
+        "message": f"File '{safe_filename}' uploaded successfully and queued for indexing.",
+        "status": "processing"
+    }
+
+class IndexExistingRequest(BaseModel):
+    filename: str
+
+@app.post("/api/v1/index-existing", status_code=202)
+async def index_existing_document(request: IndexExistingRequest, background_tasks: BackgroundTasks):
+    """
+    Notify-only endpoint for the folder watcher: the file already lives on disk
+    in DOCS_DIR (shared volume), so unlike /api/v1/upload this does NOT rewrite
+    it. That rewrite was retriggering the watcher's on_modified handler and
+    causing an infinite upload->write->modify->upload loop.
+    """
+    safe_filename = os.path.basename(request.filename or "")
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    file_path = os.path.join(DOCS_DIR, safe_filename)
+
+    if os.path.commonpath([os.path.abspath(file_path), os.path.abspath(DOCS_DIR)]) != os.path.abspath(DOCS_DIR):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"File '{safe_filename}' not found in docs directory.")
+
+    background_tasks.add_task(process_and_index_file, file_path)
+
+    return {
+        "message": f"Indexing triggered for existing file '{safe_filename}'.",
         "status": "processing"
     }
 
 @app.delete("/api/v1/documents/{filename}", status_code=202)
 async def delete_document(filename: str, background_tasks: BackgroundTasks):
-    file_path = os.path.join(DOCS_DIR, filename)
-    
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(DOCS_DIR, safe_filename)
+
     if os.path.exists(file_path):
         try:
             os.remove(file_path)
-            print(f"[API] File deleted from disk: {filename}")
+            logging.info(f"[API] File deleted from disk: {safe_filename}")
         except Exception as e:
-            print(f"[API WARNING] Error deleting file from disk: {e}")
+            logging.warning(f"[API WARNING] Error deleting file from disk: {e}")
 
-    background_tasks.add_task(delete_doc_from_chroma, filename)
+    background_tasks.add_task(delete_doc_from_chroma, safe_filename)
 
     return {
-        "message": f"Deletion request for '{filename}' received.",
+        "message": f"Deletion request for '{safe_filename}' received.",
         "status": "processing"
     }
 

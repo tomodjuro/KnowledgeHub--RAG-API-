@@ -17,7 +17,7 @@ WATCHED_FOLDER = os.path.join(BASE_DIR, "docs")
 
 API_HOST = os.getenv("API_HOST", "localhost")
 
-API_UPLOAD_URL = f"http://{API_HOST}:8000/api/v1/upload"
+API_INDEX_URL = f"http://{API_HOST}:8000/api/v1/index-existing"
 API_DELETE_URL = f"http://{API_HOST}:8000/api/v1/documents"
 
 logging.basicConfig(
@@ -51,6 +51,35 @@ class DocumentHandler(FileSystemEventHandler):
             filename.endswith(".tmp")
         )
 
+    def wait_until_stable(self, file_path, checks=2, interval=0.5, timeout=10):
+        """
+        Waits until the file's size stops changing between successive checks,
+        so we don't notify the API about a file that's still being written
+        (e.g. a large copy still in progress). Falls through after `timeout`
+        seconds even if it never stabilizes, so we don't hang forever.
+        """
+        start = time.time()
+        last_size = -1
+        stable_count = 0
+
+        while time.time() - start < timeout:
+            try:
+                size = os.path.getsize(file_path)
+            except OSError:
+                return False  # file disappeared or is inaccessible
+
+            if size == last_size:
+                stable_count += 1
+                if stable_count >= checks:
+                    return True
+            else:
+                stable_count = 0
+                last_size = size
+
+            time.sleep(interval)
+
+        return True  # give up waiting, try anyway
+
     def on_created(self, event):
         if event.is_directory or self.is_ignored(event.src_path):
             return
@@ -60,7 +89,7 @@ class DocumentHandler(FileSystemEventHandler):
 
         filename = os.path.basename(event.src_path)
         logging.info(f"[NOVA DATOTEKA] Detektirana datoteka: {filename}")
-        time.sleep(1)
+        self.wait_until_stable(event.src_path)
         self.upload_file(event.src_path)
 
     def on_modified(self, event):
@@ -72,7 +101,7 @@ class DocumentHandler(FileSystemEventHandler):
 
         filename = os.path.basename(event.src_path)
         logging.info(f"[IZMJENA DATOTEKE] Detektirana promjena: {filename}")
-        time.sleep(1)
+        self.wait_until_stable(event.src_path)
         self.upload_file(event.src_path)
 
     def on_deleted(self, event):
@@ -93,23 +122,30 @@ class DocumentHandler(FileSystemEventHandler):
 
         logging.info(f"[PREIMENOVANJE] {old_filename} -> {new_filename}")
         self.delete_file_from_api(old_filename)
-        time.sleep(1)
+        self.wait_until_stable(event.dest_path)
         self.upload_file(event.dest_path)
 
     def upload_file(self, file_path, retries=3, delay=5):
         filename = os.path.basename(file_path)
-        
+
         for attempt in range(1, retries + 1):
             try:
-                with open(file_path, "rb") as f:
-                    files = {"file": (filename, f)}
-                    response = requests.post(API_UPLOAD_URL, files=files, timeout=10)
-                    
+                # NOTE: we do NOT send file bytes anymore. The API reads the file
+                # directly from the shared docs volume. Previously this posted the
+                # raw file content to /api/v1/upload, which rewrote the file back
+                # into this same watched folder and retriggered on_modified,
+                # causing an infinite upload loop.
+                response = requests.post(API_INDEX_URL, json={"filename": filename}, timeout=10)
+
                 if response.status_code in (200, 202):
                     logging.info(f"[API SUCCESS] Datoteka {filename} poslana na indeksiranje (Status: {response.status_code})")
                     return
                 else:
                     logging.error(f"[API ERROR] Greška {response.status_code} za {filename}")
+            except (OSError, IOError) as e:
+                # File may still be locked/mid-write (e.g. large file, AV scan).
+                logging.warning(f"[RETRY {attempt}/{retries}] Datoteka {filename} nije spremna za čitanje ({e}). Ponovni pokušaj za {delay}s...")
+                time.sleep(delay)
             except requests.exceptions.RequestException as e:
                 logging.warning(f"[RETRY {attempt}/{retries}] API nedostupan za {filename}. Ponovni pokušaj za {delay}s... ({e})")
                 time.sleep(delay)

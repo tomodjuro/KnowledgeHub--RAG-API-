@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import logging
+import threading
 from dotenv import load_dotenv
 from typing import Generator
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -31,25 +32,50 @@ CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 os.makedirs(DOCS_DIR, exist_ok=True)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# Module-level singletons: these were previously recreated on every single
+# request/background task, which reloaded the HuggingFace embedding model
+# from disk repeatedly and was wasteful. Lazily initialized once and reused.
+_embeddings = None
+_vector_store = None
+_llm = None
+
+# Multiple background tasks (upload, delete, reindex) can fire close together
+# and all write to the same local SQLite-backed Chroma store. This lock
+# serializes writes to avoid "database is locked" errors / lost updates.
+_chroma_write_lock = threading.Lock()
+
 def get_embeddings():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return _embeddings
 
 def get_vector_store():
-    """Helper za dohvat Chroma baze."""
-    embeddings = get_embeddings()
-    return Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    """Helper za dohvat Chroma baze (cached singleton)."""
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=get_embeddings())
+    return _vector_store
 
 def get_llm():
-    """Helper za inicijalizaciju LLM modela."""
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY nije pronađen u .env datoteci!")
-    
-    return ChatGroq(
-        temperature=0, 
-        model_name="openai/gpt-oss-120b",
-        groq_api_key=api_key
-    )
+    """Helper za inicijalizaciju LLM modela (cached singleton)."""
+    global _llm
+    if _llm is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY nije pronađen u .env datoteci!")
+
+        _llm = ChatGroq(
+            temperature=0,
+            model_name="openai/gpt-oss-120b",
+            groq_api_key=api_key
+        )
+    return _llm
 
 def get_rag_chain():
     vector_store = get_vector_store()
@@ -107,27 +133,28 @@ def delete_doc_from_chroma(filename: str) -> int:
     """Pronalazi i briše sve vektorske fragmente povezane s datotekom iz ChromaDB baze."""
     try:
         vector_store = get_vector_store()
-        
-        # 1. Dohvaćanje svih dokumenata za provjeru imena datoteke neovisno o prefiksima putanje
-        existing_docs = vector_store._collection.get(include=["metadatas"])
-        ids_to_delete = []
-        
-        if existing_docs and "metadatas" in existing_docs:
-            for doc_id, meta in zip(existing_docs["ids"], existing_docs["metadatas"]):
-                if meta:
-                    src = meta.get("source") or meta.get("file_path") or meta.get("filename") or meta.get("file_name")
-                    if src and os.path.basename(str(src)) == filename:
-                        ids_to_delete.append(doc_id)
 
-        if ids_to_delete:
-            vector_store._collection.delete(ids=ids_to_delete)
-            print(f"[CHROMA] Uspješno obrisano {len(ids_to_delete)} fragmenta za datoteku: {filename}")
-            return len(ids_to_delete)
-        
-        print(f"[CHROMA] Nisu pronađeni vektori za datoteku: {filename}")
+        with _chroma_write_lock:
+            # 1. Dohvaćanje svih dokumenata za provjeru imena datoteke neovisno o prefiksima putanje
+            existing_docs = vector_store._collection.get(include=["metadatas"])
+            ids_to_delete = []
+
+            if existing_docs and "metadatas" in existing_docs:
+                for doc_id, meta in zip(existing_docs["ids"], existing_docs["metadatas"]):
+                    if meta:
+                        src = meta.get("source") or meta.get("file_path") or meta.get("filename") or meta.get("file_name")
+                        if src and os.path.basename(str(src)) == filename:
+                            ids_to_delete.append(doc_id)
+
+            if ids_to_delete:
+                vector_store._collection.delete(ids=ids_to_delete)
+                logging.info(f"[CHROMA] Uspješno obrisano {len(ids_to_delete)} fragmenta za datoteku: {filename}")
+                return len(ids_to_delete)
+
+        logging.info(f"[CHROMA] Nisu pronađeni vektori za datoteku: {filename}")
         return 0
     except Exception as e:
-        print(f"[CHROMA ERROR] Greška pri brisanju dokumenta {filename}: {e}")
+        logging.error(f"[CHROMA ERROR] Greška pri brisanju dokumenta {filename}: {e}")
         return 0
 
 def process_and_index_file(file_path: str):
@@ -150,10 +177,11 @@ def process_and_index_file(file_path: str):
 
         # 3. Indeksiramo nove fragmente
         vector_store = get_vector_store()
-        vector_store.add_documents(chunks)
-        print(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
+        with _chroma_write_lock:
+            vector_store.add_documents(chunks)
+        logging.info(f"[BACKGROUND TASK] Uspješno indeksirana datoteka ({os.path.splitext(file_path)[1]}): {filename}")
     except Exception as e:
-        print(f"[BACKGROUND TASK ERROR] Greška pri obradi {filename}: {e}")
+        logging.error(f"[BACKGROUND TASK ERROR] Greška pri obradi {filename}: {e}")
 
 def reindex_all_docs():
     """Prolazi kroz cijelu ./docs mapu i indeksira sve podržane dokumente."""
@@ -170,7 +198,7 @@ def reindex_all_docs():
                 process_and_index_file(file_path)
                 files_processed += 1
 
-    print(f"[REINDEX] Reindeksiranje završeno. Obrađeno datoteka: {files_processed}")
+    logging.info(f"[REINDEX] Reindeksiranje završeno. Obrađeno datoteka: {files_processed}")
 
 def sync_missing_or_modified_docs():
     """Prolazi kroz docs/ i indeksira nove/izmijenjene, a briše obrisane datoteke iz baze."""
@@ -192,7 +220,7 @@ def sync_missing_or_modified_docs():
                         mtime = meta.get("last_modified", 0)
                         indexed_files[fname] = max(indexed_files.get(fname, 0), mtime)
     except Exception as e:
-        print(f"[SYNC WARNING] Nije moguće dohvatiti postojeće metapodatke iz baze: {e}")
+        logging.warning(f"[SYNC WARNING] Nije moguće dohvatiti postojeće metapodatke iz baze: {e}")
 
     # 1. Provjera novih i izmijenjenih datoteka na disku
     disk_files = set()
@@ -215,17 +243,17 @@ def sync_missing_or_modified_docs():
     # 2. Uklanjanje datoteka koje više ne postoje na disku
     deleted_files = db_filenames - disk_files
     for deleted_file in deleted_files:
-        print(f"[SYNC] Detektirano brisanje na disku, uklanjam iz baze: {deleted_file}")
+        logging.info(f"[SYNC] Detektirano brisanje na disku, uklanjam iz baze: {deleted_file}")
         delete_doc_from_chroma(deleted_file)
 
     # 3. Indeksiranje novih/izmijenjenih
     if files_to_update:
-        print(f"[SYNC] Pronađeno {len(files_to_update)} novih/izmijenjenih datoteka. Pokrećem indeksiranje...")
+        logging.info(f"[SYNC] Pronađeno {len(files_to_update)} novih/izmijenjenih datoteka. Pokrećem indeksiranje...")
         for file_path in files_to_update:
             process_and_index_file(file_path)
-        print("[SYNC] Sinkronizacija uspješno završena.")
+        logging.info("[SYNC] Sinkronizacija uspješno završena.")
     else:
-        print("[SYNC] Sve datoteke u docs/ su ažurne.")
+        logging.info("[SYNC] Sve datoteke u docs/ su ažurne.")
 
 def generate_rag_stream(question: str) -> Generator[str, None, None]:
     """Generira tok tokena u realnom vremenu (streaming) iz LLM-a."""
